@@ -1,6 +1,8 @@
-# NGA 镜像站 v5.8 — 马卡龙风格阅读器
+# NGA 镜像站 v6.0 — 马卡龙风格阅读器
 
-基于 FluxDO 架构理念，从 NGA (bbs.nga.cn) 抓取论坛帖子，Material Design 3 马卡龙 UI 呈现。预抓取 + SQLite 缓存，网页加载 <50ms。支持登录后回复、点赞/点踩、收藏原帖链接。366 全站板块树。18 层跨进程防御体系。
+基于 FluxDO 架构理念，从 NGA (bbs.nga.cn) 抓取论坛帖子，Material Design 3 马卡龙 UI 呈现。预抓取 + SQLite 缓存 + ISR 静态再生，网页加载 <50ms。支持登录后回复、点赞/点踩、收藏原帖链接。366 全站板块树。18 层跨进程防御体系。
+
+**最新特性**：实时按需抓取、全链路并行化、FTS5 智能重建、Web Vitals 监控、SEO 自动生成、无障碍/减少动画支持。
 
 ## 技术栈
 
@@ -19,20 +21,25 @@
 
 ## 功能特性
 
-- **马卡龙亮色主题** — 5 色 radial 模糊渐变背景, 暗色一键切换
-- **侧边栏订阅** — 板块订阅管理, hover 取消
-- **帖子浏览** — SSR 直出 + SWR 双层缓存, FCP ~200ms, 单列流
+- **马卡龙亮色主题** — 5 色 radial 模糊渐变背景, 暗色一键切换, 自动跟随系统偏好
+- **侧边栏订阅** — 板块订阅管理, hover 取消, 状态持久化
+- **帖子浏览** — SSR 直出 + ISR 静态再生 (论坛 60s/帖子 300s) + SWR 双层缓存, FCP ~200ms, 单列流
 - **回复帖子** — 登录后 BBCode 富文本回复, 弹窗编辑器
 - **点赞/点踩** — 交互式投票, 乐观更新
 - **收藏系统** — 帖子/回复收藏, 链接指向 NGA 原帖
-- **全文搜索** — FTS5 + 实时索引触发器
+- **全文搜索** — FTS5 + 实时索引触发器, 智能跳过非空表重建
 - **RSS / SSE** — 订阅输出 + 实时事件流
 - **NGA 账号登录** — RSA 引擎 + 验证码 + AES-256-GCM Cookie 存储 + 自动续期
 - **自动续期** — 2-5h 随机窗口, 防 NGA 风控
 - **回复树着色** — 深度着色卡片 (奶油→紫→蓝→绿→橙)
 - **Spoiler 模糊** + **Pangu 排版**
-- **增量抓取** — 仅抓变更 + 定时自动刷新
+- **增量抓取** — 按 `last_reply_time` + `reply_count` 双指标检测变更, 定时自动刷新
 - **请求调度** — 令牌桶限流 + 指数退避重试 + 优先级队列
+- **按需实时抓取** — API 路由在数据 5 分钟未更新时自动触发 Playwright 抓取 (15s 超时)
+- **全链路并行** — 论坛级 `Promise.all` + 线程级并发限制 5 + 分页级并发限制 3
+- **SEO** — 自动生成 `sitemap.xml` + `robots.txt`
+- **Web Vitals** — 基于 `next/web-vitals` 的 CLS/LCP/FCP/INP/FID/TTFB 上报
+- **无障碍** — `prefers-reduced-motion` 自动降低 Canvas/3D 动画负载
 
 ## 版本演化
 
@@ -48,6 +55,7 @@ v5.3-5.4   加载流优化/极限压榨
 v5.5-5.6   物理突破/防御冲突解决
 v5.7       SSR登录修复/单列/BBCode清理
 v5.8       交互功能 (回复/点赞/收藏NGA链接)
+v6.0       性能大改 (按需抓取/ISR/并行化/UPSERT/SEO/测试56项)
 ```
 
 ## 下一步方向
@@ -59,6 +67,7 @@ v5.8       交互功能 (回复/点赞/收藏NGA链接)
 | 性能压榨 | 恢复 Fast Path (GBK修复)、分页预加载、图片懒加载优化 |
 | UI/UX | 回复数实时更新、页面过渡动画、移动端适配 |
 | 部署运维 | Docker 一键部署、数据备份自动化 |
+| 测试 | E2E 测试 (Playwright)、API 集成测试、性能基准 |
 
 ## 注册板块
 
@@ -155,77 +164,106 @@ npm run build && npm run start      # 启动
 src/
 ├── app/                          # Next.js App Router
 │   ├── api/v1/
-│   │   ├── forums/[fid]/route.ts  # 论坛列表 (pipeline限流+retry)
-│   │   ├── threads/[tid]/route.ts # 帖子详情 (pipeline限流+retry)
-│   │   ├── image-proxy/route.ts   # 图片代理 (分级缓存)
+│   │   ├── forums/[fid]/route.ts  # 论坛列表 (pipeline+按需抓取+ISR)
+│   │   ├── threads/[tid]/route.ts # 帖子详情 (pipeline+按需抓取+SSR内容注入)
+│   │   ├── image-proxy/route.ts   # 图片代理 (ReadableStream passthrough)
 │   │   ├── search/route.ts        # FTS5 全文搜索
 │   │   ├── rss/[fid]/route.ts    # RSS 2.0 订阅
 │   │   ├── events/route.ts       # SSE 事件流
 │   │   ├── boards/route.ts       # 板块树
 │   │   └── health/route.ts       # 健康检查
-│   ├── forum/[fid]/page.tsx      # 论坛页 (SSR预填)
-│   └── forum/[fid]/thread/[tid]/page.tsx
+│   ├── forum/[fid]/page.tsx      # 论坛页 (ISR 60s)
+│   ├── forum/[fid]/loading.tsx   # 骨架屏
+│   ├── forum/[fid]/thread/[tid]/page.tsx  # 帖子页 (ISR 300s + 内容SSR)
+│   ├── forum/[fid]/thread/[tid]/loading.tsx
+│   ├── search/page.tsx           # 搜索页 (SSR)
+│   ├── search/SearchContent.tsx  # 搜索客户端组件
+│   ├── user/[author]/page.tsx    # 用户主页 (SSR)
+│   ├── favorites/page.tsx        # 收藏页
+│   ├── skyline-hud/page.tsx      # Skyline HUD 可视化
+│   ├── sitemap.ts                # 动态 sitemap.xml
+│   ├── robots.ts                 # robots.txt
+│   └── page.tsx / HomeClient.tsx # 首页
 ├── lib/
 │   ├── scraper/                   # Playwright 引擎 (4模块拆分)
-│   │   ├── engine.ts              # 门面 (withRetry包裹)
+│   │   ├── engine.ts              # 门面 (withRetry包裹+全并行)
 │   │   ├── browser.ts             # 浏览器生命周期 (UA轮换池)
 │   │   ├── extractor.ts           # Cheerio DOM 提取
 │   │   └── parser.ts              # 后处理
-│   ├── parser/bbcode.ts           # BBCode→HTML + spoiler/pangu
+│   ├── parser/
+│   │   ├── bbcode.ts             # BBCode→HTML + spoiler/pangu
+│   │   ├── html-cleaner.ts       # NGA HTML 清理 (parseMaybeJson/cleanNgaHtml)
+│   │   └── *.test.ts             # 单元测试
 │   ├── auth/                       # NGA 登录与续期
 │   │   ├── login-engine.ts          # XPath引擎 + Legacy后备
 │   │   ├── session-store.ts         # Cookie AES加密存储
 │   │   ├── credential-store.ts      # 凭据加密存储
 │   │   └── auto-renew.ts            # 自动续期
-│   ├── cache/db.ts                # SQLite + FTS5 + 自动维护
+│   ├── cache/
+│   │   ├── db.ts                    # SQLite + FTS5 + 自动维护 + 复合索引
+│   │   └── db.test.ts               # DB/FTS5 单元测试
 │   ├── middleware/                # 中间件管道
 │   │   ├── pipeline.ts            # compose 入口
 │   │   ├── rate-limiter.ts        # 令牌桶 (3并发/1s10req)
+│   │   ├── rate-limiter.test.ts   # 限流单元测试
 │   │   ├── retry.ts               # 指数退避 (3次)
 │   │   ├── error-handler.ts       # 类型化错误
 │   │   ├── logger.ts              # 结构化日志
 │   │   └── cors.ts                # CORS 头
 │   ├── search.ts                  # FTS5 搜索
+│   ├── search.test.ts             # 搜索单元测试
 │   ├── reply-tree.ts              # 回复树
+│   ├── reply-tree.test.ts         # 回复树单元测试
+│   ├── ssr-cache.ts               # SSR 纯数据缓存 (非 JSX)
 │   ├── scroll-restore.ts          # 滚动位置恢复
 │   ├── pull-to-refresh.ts         # 下拉刷新
 │   ├── read-tracking.ts           # 已读/未读
-│   ├── theme.tsx                  # 主题切换 (MD3 light/dark)
+│   ├── theme.tsx                  # 主题切换 (MD3 light/dark + 系统偏好监听)
+│   ├── utils.ts                   # 共享工具 (parseMaybeJson, cleanNgaHtml, ...)
 │   └── types.ts                   # 数据模型
 ├── components/
 │   ├── ui/                        # GlassCard/Button/Badge/Skeleton/SearchBox/ErrorBoundary/ThemeToggle
-│   └── widgets/                   # ThreadList/PostCard/ForumPageClient/ThreadPageClient/GlassNav/BoardExplorer/BoardCard/ImageGallery/Sidebar/BottomNav/BackToTop/ChunkedPostRenderer
+│   └── widgets/                   # ThreadList/PostCard/ForumPageClient/ThreadPageClient/GlassNav/BoardExplorer/BoardCard/ImageGallery/Sidebar/BottomNav/BackToTop/ChunkedPostRenderer/AuthGate/LoginDialog/FavoritesDialog/ReplyForm
 ├── store/                         # Zustand 状态管理
-│   ├── forum-store.ts             # 论坛页状态
+│   ├── forum-store.ts             # 论坛页状态 (持久化)
 │   ├── thread-store.ts            # 帖子详情状态
 │   ├── cache-store.ts             # SWR 缓存 (LRU+pinned+stale)
 │   ├── ui-store.ts                # 订阅/localStorage
 │   ├── auth-store.ts              # 登录状态
-│   └── favorite-store.ts          # 收藏系统
-└── plugins/                       # 板块插件
-    ├── registry.ts
-    ├── car-club.ts
-    ├── music-film.ts
-    └── _template.ts
+│   ├── favorite-store.ts          # 收藏系统
+│   └── reply-store.ts             # 回复状态
+├── plugins/                       # 板块插件
+│   ├── registry.ts
+│   ├── car-club.ts
+│   ├── music-film.ts
+│   ├── spring-wind-village.ts
+│   └── _template.ts
+└── effects/                       # 动画特效
+    ├── EnhancedStarryBg.tsx       # 星空背景 (支持减少动画)
+    ├── GlowNum.tsx
+    └── LyricsAnimation.tsx
 ```
 
 ## API
 
 | 端点 | 说明 |
 |------|------|
-| `GET /api/v1/forums/:fid?page=` | 论坛帖子列表 (pipeline 限流+retry, <50ms) |
-| `GET /api/v1/threads/:tid?page=` | 帖子详情 (pipeline 限流+retry, <50ms) |
-| `GET /api/v1/image-proxy?url=` | 图片代理 (分级 max-age, 安全头) |
+| `GET /api/v1/forums/:fid?page=` | 论坛帖子列表 (pipeline + 按需抓取 15s 超时, <50ms) |
+| `GET /api/v1/threads/:tid?page=` | 帖子详情 (pipeline + 按需抓取 + SSR 内容注入, <50ms) |
+| `GET /api/v1/image-proxy?url=` | 图片代理 (ReadableStream passthrough, 安全头) |
 | `GET /api/v1/boards` | 366 板块树 |
 | `GET /api/v1/search?q=&fid=&limit=` | FTS5 全文搜索 |
 | `GET /api/v1/rss/:fid` | RSS 2.0 订阅 |
 | `GET /api/v1/events?fid=` | SSE 事件流 (30s ping) |
 | `GET /api/v1/health` | 健康检查 (内存/chrome/限流/日志) |
+| `GET /api/v1/batch/threads` | 批量线程数据查询 |
 | `POST /api/v1/auth/login` | NGA 账号登录 (xpath引擎) |
 | `POST /api/v1/auth/login/verify` | 登录验证码提交 |
 | `GET /api/v1/auth/status` | 登录状态查询 |
 | `POST /api/v1/auth/renew` | 手动续期 |
 | `POST /api/v1/auth/logout` | 退出登录 |
+| `POST /api/v1/threads/:tid/reply` | 回复帖子 |
+| `POST /api/v1/threads/:tid/posts/:pid/like` | 点赞/点踩 |
 
 详见 [`docs/API.md`](docs/API.md) 和 [`docs/AUTH.md`](docs/AUTH.md)。
 
