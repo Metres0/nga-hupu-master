@@ -1,0 +1,239 @@
+"use client";
+
+import Link from "next/link";
+import { useEffect, useRef, useCallback, useState, useMemo } from "react";
+import { useParams, useSearchParams } from "next/navigation";
+import { ThreadList } from "@/components/widgets/ThreadList";
+import { GlassSkeletonList } from "@/components/ui/GlassSkeleton";
+import { GlassButton } from "@/components/ui/GlassButton";
+import GlassNav from "@/components/widgets/GlassNav";
+import AuthGate from "@/components/widgets/AuthGate";
+import { getPlugin } from "@/plugins/registry";
+import { useCacheStore, getCacheKey } from "@/store/cache-store";
+import { useForumStore } from "@/store/forum-store";
+import { useAuthStore } from "@/store/auth-store";
+import { useScrollRestore } from "@/lib/scroll-restore";
+import { usePullToRefresh } from "@/lib/pull-to-refresh";
+
+interface ForumPageProps {
+  fid: number;
+  initialThreads?: any[] | null;
+  initialMeta?: { totalPages: number; forumName: string };
+}
+
+export default function ForumPageClient({ fid: propFid, initialThreads, initialMeta }: ForumPageProps) {
+  const params = useParams(); const searchParams = useSearchParams();
+  const fid = propFid || parseInt(params.fid as string); const currentPage = parseInt(searchParams.get("page") || "1");
+  const store = useForumStore(); const plugin = getPlugin(fid);
+  const loadedRef = useRef("");
+  const openLoginDialog = useAuthStore((s) => s.openLoginDialog);
+  const [authError, setAuthError] = useState(false);
+  useScrollRestore(`forum:${fid}`);
+
+  // Synchronous SSR seed injection — batch setState
+  const seeded = useRef(false);
+  if (!seeded.current && initialThreads && currentPage === 1) {
+    seeded.current = true;
+    const cacheKey = getCacheKey("forum", fid, 1);
+    useCacheStore.getState().set(cacheKey, {
+      data: initialThreads,
+      totalPages: initialMeta?.totalPages || 1,
+      hasMore: (initialMeta?.totalPages || 1) > 1,
+      forum: { name: initialMeta?.forumName || "" },
+      cached: true,
+    });
+    useForumStore.getState().seed({
+      threads: initialThreads as any[],
+      totalPages: initialMeta?.totalPages || 1,
+      forumName: initialMeta?.forumName || "",
+      fid,
+      loading: false,
+      cached: true,
+    });
+  }
+
+  const refreshPage = useCallback(async () => {
+    const fa = useForumStore.getState();
+    fa.setPageLoading(true);
+    const cacheKey = getCacheKey("forum", fid, currentPage);
+    useCacheStore.getState().prefetch(`/api/v1/forums/${fid}?page=${currentPage}&refresh=1`, cacheKey)
+      ?.then((json: any) => {
+        const fa = useForumStore.getState();
+        fa.setThreads(json.data || []);
+        fa.setTotalPages(json.totalPages || 1);
+        fa.setCached(json.cached || false);
+        fa.setPageLoading(false);
+      })
+      .catch(() => { useForumStore.getState().setPageLoading(false); });
+  }, [fid, currentPage]);
+
+  const { containerRef, pulling, refreshing } = usePullToRefresh({ onRefresh: refreshPage });
+
+  useEffect(() => {
+    const loadKey = `${fid}:${currentPage}`;
+    if (loadedRef.current === loadKey) return;
+    // Reset store when fid changes
+    if (loadedRef.current.split(":")[0] !== String(fid)) {
+      useForumStore.getState().reset();
+    }
+    loadedRef.current = loadKey;
+    const fa = useForumStore.getState(); fa.setFid(fid); setAuthError(false);
+    const cacheKey = getCacheKey("forum", fid, currentPage);
+    const ca = useCacheStore.getState(); const cached = ca.get<any>(cacheKey);
+    if (cached?.data) {
+      const d = cached.data;
+      fa.setThreads(d.data || d || []);
+      fa.setTotalPages(d.totalPages || 1);
+      fa.setHasMore(d.hasMore || false);
+      fa.setForumName(d.forum?.name || "");
+      fa.setCached(d.cached || false);
+      fa.setLoading(false); fa.setPageLoading(false);
+      if (cached.stale) {
+        ca.prefetch(`/api/v1/forums/${fid}?page=${currentPage}`, cacheKey)?.then((newData: any) => {
+          if (!newData?.data) return;
+          const fa = useForumStore.getState();
+          const oldTids = fa.threads?.slice(0, 3).map((t: any) => t.tid) || [];
+          const newTids = newData.data.slice(0, 3).map((t: any) => t.tid);
+          if (oldTids.every((id: number, i: number) => id === newTids[i])) {
+            fa.updateThreadMeta(newData.data.map((t: any) => ({ tid: t.tid, replyCount: t.replyCount, lastReplyTime: t.lastReplyTime })));
+          } else {
+            fa.setThreads(newData.data); fa.setTotalPages(newData.totalPages || 1); fa.setHasMore(newData.hasMore || false);
+          }
+        }).catch(() => {});
+      }
+      return;
+    }
+    if (currentPage === 1) fa.setLoading(true); else fa.setPageLoading(true); fa.setError(null);
+    ca.prefetch(`/api/v1/forums/${fid}?page=${currentPage}`, cacheKey)?.then((json: any) => {
+      if (!json?.data) throw new Error("empty");
+      const fa = useForumStore.getState();
+      fa.setThreads(json.data); fa.setTotalPages(json.totalPages || 1);
+      fa.setHasMore(json.hasMore || false); fa.setForumName(json.forum?.name || "");
+      fa.setCached(json.cached || false); fa.setLoading(false); fa.setPageLoading(false);
+    }).catch((err) => {
+      if (!authError) { const fa = useForumStore.getState(); fa.setError(err.message || "加载失败"); fa.setLoading(false); fa.setPageLoading(false); }
+    });
+  }, [fid, currentPage]);
+
+  const requiresLogin = plugin?.requiresLogin || false;
+
+  if (requiresLogin) {
+    return (
+      <AuthGate forumName={plugin?.name}>
+        <ForumContent fid={fid} currentPage={currentPage} store={store} plugin={plugin}
+          containerRef={containerRef} pulling={pulling} refreshing={refreshing}
+          authError={authError} openLoginDialog={openLoginDialog} onRefresh={refreshPage} />
+      </AuthGate>
+    );
+  }
+
+  return (
+    <ForumContent fid={fid} currentPage={currentPage} store={store} plugin={plugin}
+      containerRef={containerRef} pulling={pulling} refreshing={refreshing}
+      authError={authError} openLoginDialog={openLoginDialog} onRefresh={refreshPage} />
+  );
+}
+
+function ForumContent({ fid, currentPage, store, plugin, containerRef, pulling, refreshing, authError, openLoginDialog, onRefresh }: any) {
+  const filtered = useMemo(() =>
+    !plugin || plugin.categories.length <= 1 || store.activeCategory === "all"
+      ? store.threads
+      : store.threads.filter((t: any) => { const cat = plugin.categories.find((c: any) => c.id === store.activeCategory); return cat ? (t.title.includes(`[${cat.name}]`) || t.categories?.includes(cat.name)) : true; }),
+    [store.threads, store.activeCategory, plugin]
+  );
+  const sorted = useMemo(() =>
+    [...filtered].sort((a: any, b: any) => {
+      const dir = store.sortAsc ? 1 : -1;
+      if (store.sortBy === "replyCount") return (b.replyCount - a.replyCount) * dir;
+      if (store.sortBy === "createTime") return (b.createTime - a.createTime) * dir;
+      return (b.lastReplyTime - a.lastReplyTime) * dir;
+    }),
+    [filtered, store.sortBy, store.sortAsc]
+  );
+
+  return (
+    <div ref={containerRef}>
+      {(pulling || refreshing) && (
+        <div className="flex justify-center py-3 text-xs text-[var(--text-tertiary)]">
+          {refreshing ? "刷新中..." : "下拉刷新"}
+        </div>
+      )}
+      <GlassNav forumName={plugin?.name || store.forumName || `板块 ${fid}`} forumFid={fid} showBack={true} />
+      {!authError && !store.loading && (
+        <div className="px-4 py-2 flex items-center gap-2">
+          <Link href={`/search?fid=${fid}`} className="shrink-0 flex items-center gap-1.5 text-xs text-[var(--text-tertiary)] hover:text-[var(--text-primary)] glass-card px-2.5 py-1.5 rounded-lg no-underline transition-colors">
+            <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg>
+            搜索
+          </Link>
+          <SortBar fid={fid} />
+          <button onClick={() => onRefresh()} className="shrink-0 text-xs text-[var(--text-tertiary)] hover:text-[var(--text-primary)] glass-card px-2 py-1 rounded-lg transition-colors ml-auto" title="刷新论坛列表">
+            ↻ 刷新
+          </button>
+        </div>
+      )}
+      {authError && (
+        <div className="flex flex-col items-center justify-center py-16 px-4 text-center">
+          <span className="text-3xl mb-3">🚫</span>
+          <p className="text-sm font-semibold text-[var(--text-primary)] mb-1">
+            {plugin?.requiresLogin ? "此板块需要登录后才能访问" : "登录已过期，需要重新登录"}
+          </p>
+          <p className="text-xs text-[var(--text-tertiary)] mb-4">{"请登录 NGA 账号后查看此内容"}</p>
+          <button onClick={openLoginDialog}
+            className="px-5 py-2 rounded-xl bg-[var(--md-primary)] text-[var(--md-on-primary)] text-sm font-semibold hover:shadow-elevated transition-all active:scale-[0.98]">
+            立即登录
+          </button>
+        </div>
+      )}
+      {!authError && store.loading && <GlassSkeletonList count={8} />}
+      {!authError && store.error && !store.loading && (
+        <div className="text-center py-16 glass-card rounded-2xl mx-4 mt-4">
+          <p className="text-[var(--md-error)] text-sm mb-4">{store.error}</p>
+          <GlassButton variant="secondary" onClick={() => window.location.reload()}>重试</GlassButton>
+        </div>
+      )}
+      {!authError && !store.loading && !store.error && (
+        <>
+          {plugin && plugin.categories.length > 1 && (
+            <div className="px-4 py-2 flex gap-2 overflow-x-auto">
+              {plugin.categories.map((cat: { id: string; name: string }) => (
+                <button key={cat.id} onClick={() => useForumStore.getState().setActiveCategory(cat.id)}
+                  className={`shrink-0 px-3 py-1.5 rounded-full text-xs transition-all ${store.activeCategory === cat.id ? "bg-[var(--md-primary)] text-[var(--md-on-primary)]" : "glass-card text-[var(--text-secondary)] hover:bg-[var(--surface-hover)]"}`}>
+                  {cat.name}
+                </button>
+              ))}
+            </div>
+          )}
+          <ThreadList threads={sorted} fid={fid} />
+          {store.hasMore && (
+            <div className="flex justify-center py-4">
+              <Link href={`/forum/${fid}?page=${currentPage + 1}`} className="no-underline">
+                <GlassButton variant="secondary" size="sm">下一页</GlassButton>
+              </Link>
+            </div>
+          )}
+          {store.pageLoading && <div className="text-center text-xs text-[var(--text-tertiary)] py-3">加载中...</div>}
+        </>
+      )}
+    </div>
+  );
+}
+
+function SortBar({ fid }: { fid: number }) {
+  const { sortBy, sortAsc, setSortBy, toggleSortOrder } = useForumStore();
+  const options = [
+    { value: "lastReply" as const, label: "最新回复" },
+    { value: "createTime" as const, label: "最新发帖" },
+    { value: "replyCount" as const, label: "最多回复" },
+  ];
+  return (
+    <div className="flex items-center gap-1 flex-wrap">
+      {options.map((o) => (
+        <button key={o.value} onClick={() => { if (sortBy === o.value) toggleSortOrder(); else setSortBy(o.value); }}
+          className={`px-2.5 py-1 rounded-full text-xs transition-all ${sortBy === o.value ? "bg-[var(--md-primary)] text-[var(--md-on-primary)]" : "glass-card text-[var(--text-secondary)] hover:bg-[var(--surface-hover)]"}`}>
+          {o.label}
+          {sortBy === o.value && (sortAsc ? " ↑" : " ↓")}
+        </button>
+      ))}
+    </div>
+  );
+}
